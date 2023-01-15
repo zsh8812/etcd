@@ -16,7 +16,6 @@ package cmd
 
 import (
 	"context"
-	"encoding/binary"
 	"fmt"
 	"math"
 	"math/rand"
@@ -24,11 +23,10 @@ import (
 	"strings"
 	"time"
 
-	v3 "go.etcd.io/etcd/client/v3"
-	"go.etcd.io/etcd/pkg/v3/report"
-
 	"github.com/dustin/go-humanize"
 	"github.com/spf13/cobra"
+	v3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/pkg/v3/report"
 	"golang.org/x/time/rate"
 	"gopkg.in/cheggaaa/pb.v1"
 )
@@ -42,8 +40,9 @@ var putCmd = &cobra.Command{
 }
 
 var (
-	keySize int
-	valSize int
+	keyPrefix string
+	keySize   int
+	valSize   int
 
 	putTotal int
 	putRate  int
@@ -59,6 +58,7 @@ var (
 
 func init() {
 	RootCmd.AddCommand(putCmd)
+	putCmd.Flags().StringVar(&keyPrefix, "key-prefix", "/test/", "prefix for keys")
 	putCmd.Flags().IntVar(&keySize, "key-size", 8, "Key size of put request")
 	putCmd.Flags().IntVar(&valSize, "val-size", 8, "Value size of put request")
 	putCmd.Flags().IntVar(&putRate, "rate", 0, "Maximum puts per second (0 is no limit)")
@@ -83,7 +83,7 @@ func putFunc(cmd *cobra.Command, args []string) {
 	}
 	limit := rate.NewLimiter(rate.Limit(putRate), 1)
 	clients := mustCreateClients(totalClients, totalConns)
-	k, v := make([]byte, keySize), string(mustRandBytes(valSize))
+	v := string(mustRandBytes(valSize))
 
 	bar = pb.New(putTotal)
 	bar.Format("Bom !")
@@ -107,12 +107,13 @@ func putFunc(cmd *cobra.Command, args []string) {
 
 	go func() {
 		for i := 0; i < putTotal; i++ {
+			k := keyPrefix
 			if seqKeys {
-				binary.PutVarint(k, int64(i%keySpaceSize))
+				k = fmt.Sprintf("%s%d", k, int64(i%keySpaceSize))
 			} else {
-				binary.PutVarint(k, int64(rand.Intn(keySpaceSize)))
+				k = fmt.Sprintf("%s%d", k, int64(rand.Intn(keySpaceSize)))
 			}
-			requests <- v3.OpPut(string(k), v)
+			requests <- v3.OpPut(k, v)
 		}
 		close(requests)
 	}()
