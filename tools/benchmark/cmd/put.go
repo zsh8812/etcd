@@ -58,7 +58,7 @@ var (
 
 func init() {
 	RootCmd.AddCommand(putCmd)
-	putCmd.Flags().StringVar(&keyPrefix, "key-prefix", "/test/", "prefix for keys")
+	putCmd.Flags().StringVar(&keyPrefix, "key-prefix", "/test", "prefix for keys")
 	putCmd.Flags().IntVar(&keySize, "key-size", 8, "Key size of put request")
 	putCmd.Flags().IntVar(&valSize, "val-size", 8, "Value size of put request")
 	putCmd.Flags().IntVar(&putRate, "rate", 0, "Maximum puts per second (0 is no limit)")
@@ -105,14 +105,29 @@ func putFunc(cmd *cobra.Command, args []string) {
 		}(clients[i])
 	}
 
+	var bigComp string
+	for i := 0; i < keySize; i++ {
+		bigComp = bigComp + "0"
+	}
+
+	keyPrefix = strings.TrimSuffix(keyPrefix, "/")
+
 	go func() {
 		for i := 0; i < putTotal; i++ {
 			k := keyPrefix
+			var num int64
 			if seqKeys {
-				k = fmt.Sprintf("%s%d", k, int64(i%keySpaceSize))
+				num = int64(i % keySpaceSize)
 			} else {
-				k = fmt.Sprintf("%s%d", k, int64(rand.Intn(keySpaceSize)))
+				num = int64(rand.Intn(keySpaceSize))
 			}
+			keySuffix := fmt.Sprintf("%d", num)
+			if len(keySuffix) > keySize {
+				keySuffix = keySuffix[:keySize]
+			} else if len(keySuffix) < keySize {
+				keySuffix = bigComp[0:keySize-len(keySuffix)] + keySuffix
+			}
+			k = fmt.Sprintf("%s/%s", k, keySuffix)
 			requests <- v3.OpPut(k, v)
 		}
 		close(requests)
