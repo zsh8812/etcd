@@ -24,7 +24,6 @@ import (
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/mvccpb"
 	v3rpc "go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
-
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -191,10 +190,11 @@ type watchStreamRequest interface {
 
 // watchRequest is issued by the subscriber to start a new watcher
 type watchRequest struct {
-	ctx context.Context
-	key string
-	end string
-	rev int64
+	ctx       context.Context
+	key       string
+	end       string
+	rev       int64
+	clusterID uint64
 
 	// send created notification event if this field is true
 	createdNotify bool
@@ -569,6 +569,7 @@ func (w *watchGrpcStream) run() {
 
 		// new events from the watch client
 		case pbresp := <-w.respc:
+			w.lg.Info("received response from server", zap.String("response", pbresp.String()))
 			if cur == nil || pbresp.Created || pbresp.Canceled {
 				cur = pbresp
 			} else if cur != nil && cur.WatchId == pbresp.WatchId {
@@ -645,16 +646,19 @@ func (w *watchGrpcStream) run() {
 
 		// watch client failed on Recv; spawn another if possible
 		case err := <-w.errc:
+			w.lg.Info("watchGrpcStream.errc -> err: %v", zap.Error(err))
 			if isHaltErr(w.ctx, err) || toErr(w.ctx, err) == v3rpc.ErrNoLeader {
 				closeErr = err
 				return
 			}
+			w.lg.Info("call newWatchClient")
 			if wc, closeErr = w.newWatchClient(); closeErr != nil {
 				return
 			}
 			if ws := w.nextResume(); ws != nil {
+				w.lg.Info("send watch in resume", zap.String("key", ws.initReq.key))
 				if err := wc.Send(ws.initReq.toPB()); err != nil {
-					w.lg.Debug("error when sending request", zap.Error(err))
+					w.lg.Info("error when sending request", zap.Error(err))
 				}
 			}
 			cancelSet = make(map[int64]struct{})
@@ -808,13 +812,28 @@ func (w *watchGrpcStream) serveSubstream(ws *watcherStream, resumec chan struct{
 			ws.buf[0] = nil
 			ws.buf = ws.buf[1:]
 		case wr, ok := <-ws.recvc:
+			w.lg.Info("serveSubstream: received wr", zap.String("wr header", wr.Header.String()))
+			w.lg.Info("serveSubstream: received wr", zap.Bool("create: ", wr.Created), zap.Bool("canceled", wr.Canceled))
+			if wr.closeErr != nil {
+				w.lg.Info("serveSubstream: received wr", zap.String("closeErr", wr.closeErr.Error()))
+			}
+			if len(wr.Events) > 0 {
+				w.lg.Info("serveSubstream: received wr", zap.Int64("CompactRevision", wr.CompactRevision), zap.String("wr header", wr.Events[0].Kv.String()))
+			}
 			if !ok {
 				// shutdown from closeSubstream
 				return
 			}
 
 			if wr.Created {
+				w.lg.Info("serveSubstream: processed created", zap.String("initReq", ws.initReq.toPB().String()))
+				if ws.initReq.clusterID == 0 {
+					ws.initReq.clusterID = wr.Header.ClusterId
+				} else if ws.initReq.clusterID != wr.Header.ClusterId {
+					wr.Canceled = true
+				}
 				if ws.initReq.retc != nil {
+					w.lg.Info("serveSubstream: processed created", zap.Bool("ws.initReq.retc is not nil", true))
 					ws.initReq.retc <- ws.outc
 					// to prevent next write from taking the slot in buffered channel
 					// and posting duplicate create events
@@ -836,6 +855,8 @@ func (w *watchGrpcStream) serveSubstream(ws *watcherStream, resumec chan struct{
 					if ws.initReq.rev == 0 {
 						nextRev = wr.Header.Revision
 					}
+				} else {
+					w.lg.Info("serveSubstream: processed created", zap.Bool("ws.initReq.retc is not nil", false))
 				}
 			} else {
 				// current progress of watch; <= store revision
@@ -850,16 +871,21 @@ func (w *watchGrpcStream) serveSubstream(ws *watcherStream, resumec chan struct{
 			// created event is already sent above,
 			// watcher should not post duplicate events
 			if wr.Created {
+				w.lg.Info("serveSubstream created done")
 				continue
 			}
 
 			// TODO pause channel if buffer gets too large
 			ws.buf = append(ws.buf, wr)
+			w.lg.Info("serveSubstream event done")
 		case <-w.ctx.Done():
+			w.lg.Info("serveSubstream: recv <-w.ctx.Done()")
 			return
 		case <-ws.initReq.ctx.Done():
+			w.lg.Info("serveSubstream: recv ws.initReq.ctx.Done()")
 			return
 		case <-resumec:
+			w.lg.Info("serveSubstream: recv resumec")
 			resuming = true
 			return
 		}
